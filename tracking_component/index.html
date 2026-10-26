@@ -1,0 +1,144 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/@supabase/supabase-js@2.49.8/dist/umd/supabase.js"></script>
+  <style>
+    html,body { margin:0; background:#08111d; color:#eaf2f5; font:14px system-ui,sans-serif; }
+    #controls { min-height:42px; display:flex; align-items:center; gap:10px; padding:5px 2px; }
+    button { border:0; border-radius:6px; padding:10px 15px; font-weight:700; cursor:pointer; }
+    #start { background:#62d6ae; color:#07120f; } #stop { background:#492a2a; color:#ffe3df; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    #message { color:#b8cbd1; font-size:12px; }
+    #map { width:100%; height:440px; background:#08111d; border-radius:8px; overflow:hidden; }
+    .maplibregl-ctrl-attrib { font-size:10px; }
+    .pin { width:16px; height:16px; border:3px solid white; border-radius:50%; box-shadow:0 0 14px currentColor; }
+    .ambulance { width:24px; height:24px; border:3px solid white; border-radius:50%; background:#38aaff; box-shadow:0 0 16px #38aaff; }
+    .ambulance.stale { background:#9099a0; box-shadow:0 0 10px #9099a0; }
+  </style>
+</head>
+<body>
+  <div id="controls"><button id="start" type="button">Start location sharing</button><button id="stop" type="button" disabled>Stop location sharing</button><span id="message">Location sharing is off.</span></div>
+  <div id="map"></div>
+  <script>
+    const startButton = document.getElementById('start');
+    const stopButton = document.getElementById('stop');
+    const message = document.getElementById('message');
+    let watchId = null, currentArgs = {}, map = null, loaded = false, lastFixAt = null;
+    let routeSourceReady = false, markers = [], fitKey = '', realtimeKey = '', realtimeClient = null, realtimeChannel = null, pollTimer = null;
+    const send = value => window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',dataType:'json',value}, '*');
+    const setHeight = height => window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height}, '*');
+
+    function report(messageText, kind='status') { message.textContent = messageText; send({kind, message:messageText, event_id:Date.now()+'-'+Math.random().toString(16).slice(2)}); }
+    function beginSharing() {
+      if (!currentArgs.gps_enabled) { message.textContent = currentArgs.gps_message || 'Location sharing is unavailable for this account or mission.'; return; }
+      if (!navigator.geolocation) { message.textContent = 'GPS is unavailable in this browser.'; report(message.textContent, 'gps_error'); return; }
+      if (watchId !== null) return;
+      startButton.disabled = true; stopButton.disabled = false;
+      message.textContent = 'Requesting browser location permission…';
+      report('Location sharing started; waiting for a GPS fix.', 'share_start');
+      watchId = navigator.geolocation.watchPosition(position => {
+        const fix = position.coords;
+        lastFixAt = Date.now();
+        message.textContent = `Sharing GPS · accuracy ${Math.round(fix.accuracy)} m`;
+        send({kind:'gps', event_id:Date.now()+'-'+Math.random().toString(16).slice(2), latitude:fix.latitude, longitude:fix.longitude, accuracy_m:fix.accuracy, captured_at_ms:position.timestamp});
+      }, error => {
+        const explanation = error.code === 1 ? 'Location permission denied. Allow location access in the browser, then try again.' : error.code === 2 ? 'GPS position is unavailable. Check device location services and GPS reception.' : 'GPS request timed out. Keep the app open and try again.';
+        message.textContent = explanation; startButton.disabled = false; stopButton.disabled = true;
+        watchId = null; report(explanation, 'gps_error');
+      }, {enableHighAccuracy:true, maximumAge:0, timeout:20000});
+    }
+    function endSharing() {
+      if (watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(watchId);
+      watchId = null; startButton.disabled = false; stopButton.disabled = true;
+      message.textContent = 'Location sharing stopped.'; report(message.textContent, 'share_stop');
+    }
+    startButton.addEventListener('click', beginSharing);
+    stopButton.addEventListener('click', endSharing);
+
+    function addMarker(point, color, title, stale=false) {
+      if (!point) return;
+      const el = document.createElement('div'); el.className = stale ? 'ambulance stale' : (title === 'Ambulance location' ? 'ambulance' : 'pin');
+      if (title !== 'Ambulance location') { el.style.background = color; el.style.color = color; }
+      el.title = title;
+      markers.push(new maplibregl.Marker({element:el}).setLngLat(point).setPopup(new maplibregl.Popup().setText(title)).addTo(map));
+    }
+    function startPolling() {
+      if (currentArgs.polling && !pollTimer) pollTimer = setInterval(() => send({kind:'refresh',event_id:Date.now()+'-poll'}), 8000);
+    }
+    function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
+    function configureUpdates(args) {
+      const config = args.realtime;
+      const nextKey = config ? `${config.url}|${config.mission_id}|${String(config.access_token || '').slice(-12)}` : '';
+      if (nextKey === realtimeKey) { if (!config) startPolling(); return; }
+      realtimeKey = nextKey;
+      if (realtimeChannel) { try { realtimeChannel.unsubscribe(); } catch (_) {} }
+      realtimeChannel = null; realtimeClient = null;
+      if (!config || !config.access_token || !window.supabase) { startPolling(); return; }
+      startPolling();
+      try {
+        realtimeClient = window.supabase.createClient(config.url, config.key, {auth:{persistSession:false,autoRefreshToken:false}});
+        realtimeClient.realtime.setAuth(config.access_token);
+        realtimeChannel = realtimeClient.channel('mission-location-' + config.mission_id)
+          .on('postgres_changes', {event:'INSERT',schema:'public',table:'current_locations',filter:'mission_id=eq.' + config.mission_id}, () => {
+            send({kind:'realtime_update',event_id:Date.now()+'-realtime'});
+          })
+          .subscribe(status => { if (status === 'SUBSCRIBED') stopPolling(); else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') startPolling(); });
+      } catch (_) { startPolling(); }
+    }
+    function draw(args) {
+      currentArgs = args || {};
+      document.getElementById('controls').style.display = currentArgs.gps_controls ? 'flex' : 'none';
+      startButton.disabled = !currentArgs.gps_enabled || watchId !== null;
+      stopButton.disabled = watchId === null;
+      if (!currentArgs.gps_enabled && currentArgs.gps_message) message.textContent = currentArgs.gps_message;
+      if (!currentArgs.gps_enabled && watchId !== null) endSharing();
+      if (!map) {
+        map = new maplibregl.Map({container:'map',style:'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',center:[77.5946,12.9716],zoom:11,pitch:55,bearing:-18,attributionControl:true});
+        map.addControl(new maplibregl.NavigationControl(), 'top-right');
+        map.on('load', () => { loaded = true; (map.getStyle().layers || []).forEach(layer => { if (layer.type === 'fill-extrusion') map.setPaintProperty(layer.id,'fill-extrusion-opacity',0.8); }); draw(currentArgs); });
+        return;
+      }
+      if (!loaded) return;
+      configureUpdates(args);
+      const route = Array.isArray(args.route) ? args.route : [];
+      const lineData = {type:'Feature',geometry:route.length >= 2 ? {type:'LineString',coordinates:route} : null};
+      if (!routeSourceReady) {
+        map.addSource('mission-route',{type:'geojson',data:lineData});
+        map.addLayer({id:'mission-route-glow',type:'line',source:'mission-route',paint:{'line-color':'#ff4b22','line-width':12,'line-opacity':0.25,'line-blur':3}});
+        map.addLayer({id:'mission-route-line',type:'line',source:'mission-route',paint:{'line-color':'#ff542e','line-width':5,'line-dasharray':args.route_kind === 'demo' || args.route_kind === 'endpoints' ? [2,2] : [1,0]}});
+        routeSourceReady = true;
+      } else map.getSource('mission-route').setData(lineData);
+      map.setPaintProperty('mission-route-line','line-dasharray',args.route_kind === 'demo' || args.route_kind === 'endpoints' ? [2,2] : [1,0]);
+      markers.forEach(marker => marker.remove()); markers = [];
+      addMarker(args.origin, '#35e0a1', 'Origin'); addMarker(args.destination, '#ff9a3c', 'Destination');
+      (args.junctions || []).forEach(junction => {
+        const color = junction.progress === 'passed' ? '#707a83' : junction.progress === 'current' ? '#ffe05c' : junction.progress === 'upcoming' ? '#b18cff' : '#91a6ad';
+        const label = junction.name + (junction.progress ? ' · ' + junction.progress : '') + (junction.traffic_status ? ' · ' + junction.traffic_status : '');
+        addMarker(junction.coordinates, color, label);
+      });
+      const ambulance = args.ambulance;
+      addMarker(ambulance && ambulance.coordinates, '#38aaff', ambulance ? `Ambulance · ${ambulance.stale ? 'stale' : 'live'}` : 'Ambulance location', ambulance && ambulance.stale);
+      const points = [...route, args.origin, args.destination, ambulance && ambulance.coordinates].filter(Boolean);
+      const nextFitKey = (args.mission_name || '') + JSON.stringify(route);
+      if (points.length && nextFitKey !== fitKey) {
+        fitKey = nextFitKey;
+        const bounds = points.reduce((box, point) => box.extend(point), new maplibregl.LngLatBounds(points[0],points[0]));
+        map.fitBounds(bounds,{padding:60,maxZoom:15,duration:0});
+      }
+    }
+    window.addEventListener('message', event => {
+      const msg = event.data || {};
+      if (msg.type === 'streamlit:render') draw(msg.args && msg.args.data ? msg.args.data : {});
+    });
+    setInterval(() => {
+      if (watchId !== null && lastFixAt && Date.now() - lastFixAt > 30000) message.textContent = 'GPS updates are stale. Check reception or device location services.';
+    }, 5000);
+    window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1}, '*');
+    setHeight(500);
+  </script>
+</body>
+</html>
