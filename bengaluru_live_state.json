@@ -1,0 +1,11 @@
+{
+  "city": "Bengaluru",
+  "status": "ACTIVE - CRITICAL",
+  "unit_id": "KA-01-EM-4092",
+  "destination": "Victoria Hospital (City Market)",
+  "eta_min": 4,
+  "eta_sec": 12,
+  "distance_km": 1.8,
+  "progress_pct": 82,
+  "speed_kph": 55
+}

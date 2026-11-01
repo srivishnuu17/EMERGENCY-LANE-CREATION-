@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-  <script src="https://unpkg.com/@supabase/supabase-js@2.49.8/dist/umd/supabase.js"></script>
   <style>
     html,body { margin:0; background:#08111d; color:#eaf2f5; font:14px system-ui,sans-serif; }
     #controls { min-height:42px; display:flex; align-items:center; gap:10px; padding:5px 2px; }
@@ -13,10 +12,11 @@
     #start { background:#62d6ae; color:#07120f; } #stop { background:#492a2a; color:#ffe3df; }
     button:disabled { opacity:.45; cursor:not-allowed; }
     #message { color:#b8cbd1; font-size:12px; }
-    #map { width:100%; height:440px; background:#08111d; border-radius:8px; overflow:hidden; }
+    #map { width:100%; height:clamp(420px, 66vh, 760px); background:#08111d; border:1px solid #263743; border-radius:10px; overflow:hidden; }
+    @media (max-width:700px) { #controls { flex-wrap:wrap; } #message { flex:1 1 100%; } #map { height:390px; } }
     .maplibregl-ctrl-attrib { font-size:10px; }
     .pin { width:16px; height:16px; border:3px solid white; border-radius:50%; box-shadow:0 0 14px currentColor; }
-    .ambulance { width:24px; height:24px; border:3px solid white; border-radius:50%; background:#38aaff; box-shadow:0 0 16px #38aaff; }
+    .ambulance { width:26px; height:26px; border:3px solid white; border-radius:50%; background:#38aaff; box-shadow:0 0 16px #38aaff; display:grid;place-items:center;color:#06121d;font-size:14px;font-weight:900 }
     .ambulance.stale { background:#9099a0; box-shadow:0 0 10px #9099a0; }
   </style>
 </head>
@@ -28,7 +28,7 @@
     const stopButton = document.getElementById('stop');
     const message = document.getElementById('message');
     let watchId = null, currentArgs = {}, map = null, loaded = false, lastFixAt = null;
-    let routeSourceReady = false, markers = [], fitKey = '', realtimeKey = '', realtimeClient = null, realtimeChannel = null, pollTimer = null;
+    let routeSourceReady = false, markers = [], fitKey = '', pollTimer = null;
     const send = value => window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',dataType:'json',value}, '*');
     const setHeight = height => window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height}, '*');
 
@@ -59,10 +59,11 @@
     startButton.addEventListener('click', beginSharing);
     stopButton.addEventListener('click', endSharing);
 
-    function addMarker(point, color, title, stale=false) {
+    function addMarker(point, color, title, stale=false, kind='pin') {
       if (!point) return;
-      const el = document.createElement('div'); el.className = stale ? 'ambulance stale' : (title === 'Ambulance location' ? 'ambulance' : 'pin');
-      if (title !== 'Ambulance location') { el.style.background = color; el.style.color = color; }
+      const el = document.createElement('div'); el.className = kind === 'ambulance' ? (stale ? 'ambulance stale' : 'ambulance') : 'pin';
+      if (kind === 'ambulance') { el.textContent = 'A'; }
+      else { el.style.background = color; el.style.color = color; }
       el.title = title;
       markers.push(new maplibregl.Marker({element:el}).setLngLat(point).setPopup(new maplibregl.Popup().setText(title)).addTo(map));
     }
@@ -71,23 +72,7 @@
     }
     function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
     function configureUpdates(args) {
-      const config = args.realtime;
-      const nextKey = config ? `${config.url}|${config.mission_id}|${String(config.access_token || '').slice(-12)}` : '';
-      if (nextKey === realtimeKey) { if (!config) startPolling(); return; }
-      realtimeKey = nextKey;
-      if (realtimeChannel) { try { realtimeChannel.unsubscribe(); } catch (_) {} }
-      realtimeChannel = null; realtimeClient = null;
-      if (!config || !config.access_token || !window.supabase) { startPolling(); return; }
-      startPolling();
-      try {
-        realtimeClient = window.supabase.createClient(config.url, config.key, {auth:{persistSession:false,autoRefreshToken:false}});
-        realtimeClient.realtime.setAuth(config.access_token);
-        realtimeChannel = realtimeClient.channel('mission-location-' + config.mission_id)
-          .on('postgres_changes', {event:'INSERT',schema:'public',table:'current_locations',filter:'mission_id=eq.' + config.mission_id}, () => {
-            send({kind:'realtime_update',event_id:Date.now()+'-realtime'});
-          })
-          .subscribe(status => { if (status === 'SUBSCRIBED') stopPolling(); else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') startPolling(); });
-      } catch (_) { startPolling(); }
+      if (args.polling) startPolling(); else stopPolling();
     }
     function draw(args) {
       currentArgs = args || {};
@@ -97,9 +82,17 @@
       if (!currentArgs.gps_enabled && currentArgs.gps_message) message.textContent = currentArgs.gps_message;
       if (!currentArgs.gps_enabled && watchId !== null) endSharing();
       if (!map) {
-        map = new maplibregl.Map({container:'map',style:'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',center:[77.5946,12.9716],zoom:11,pitch:55,bearing:-18,attributionControl:true});
+        map = new maplibregl.Map({container:'map',style:'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',center:[77.5946,12.9716],zoom:11,pitch:52,bearing:-14,attributionControl:true});
         map.addControl(new maplibregl.NavigationControl(), 'top-right');
-        map.on('load', () => { loaded = true; (map.getStyle().layers || []).forEach(layer => { if (layer.type === 'fill-extrusion') map.setPaintProperty(layer.id,'fill-extrusion-opacity',0.8); }); draw(currentArgs); });
+        map.on('load', () => {
+          loaded = true;
+          // Keep the dark street basemap free of terrain and hillshade overlays,
+          // which can appear as disconnected gray patches at an oblique angle.
+          if (map.setTerrain) map.setTerrain(null);
+          (map.getStyle().layers || []).filter(layer => layer.type === 'hillshade').forEach(layer => map.removeLayer(layer.id));
+          draw(currentArgs);
+        });
+        map.on('error', event => { if (event && event.error) { message.textContent = 'Map tiles or style could not load. Check network access to the CARTO dark map style.'; } });
         return;
       }
       if (!loaded) return;
@@ -108,11 +101,10 @@
       const lineData = {type:'Feature',geometry:route.length >= 2 ? {type:'LineString',coordinates:route} : null};
       if (!routeSourceReady) {
         map.addSource('mission-route',{type:'geojson',data:lineData});
-        map.addLayer({id:'mission-route-glow',type:'line',source:'mission-route',paint:{'line-color':'#ff4b22','line-width':12,'line-opacity':0.25,'line-blur':3}});
-        map.addLayer({id:'mission-route-line',type:'line',source:'mission-route',paint:{'line-color':'#ff542e','line-width':5,'line-dasharray':args.route_kind === 'demo' || args.route_kind === 'endpoints' ? [2,2] : [1,0]}});
+        map.addLayer({id:'mission-route-glow',type:'line',source:'mission-route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ff4b22','line-width':14,'line-opacity':0.22,'line-blur':3}});
+        map.addLayer({id:'mission-route-line',type:'line',source:'mission-route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ff542e','line-width':6,'line-opacity':0.98}});
         routeSourceReady = true;
       } else map.getSource('mission-route').setData(lineData);
-      map.setPaintProperty('mission-route-line','line-dasharray',args.route_kind === 'demo' || args.route_kind === 'endpoints' ? [2,2] : [1,0]);
       markers.forEach(marker => marker.remove()); markers = [];
       addMarker(args.origin, '#35e0a1', 'Origin'); addMarker(args.destination, '#ff9a3c', 'Destination');
       (args.junctions || []).forEach(junction => {
@@ -121,14 +113,19 @@
         addMarker(junction.coordinates, color, label);
       });
       const ambulance = args.ambulance;
-      addMarker(ambulance && ambulance.coordinates, '#38aaff', ambulance ? `Ambulance · ${ambulance.stale ? 'stale' : 'live'}` : 'Ambulance location', ambulance && ambulance.stale);
-      const points = [...route, args.origin, args.destination, ambulance && ambulance.coordinates].filter(Boolean);
-      const nextFitKey = (args.mission_name || '') + JSON.stringify(route);
-      if (points.length && nextFitKey !== fitKey) {
+      addMarker(ambulance && ambulance.coordinates, '#38aaff', ambulance ? `Ambulance · ${ambulance.stale ? 'stale' : 'live'}` : 'Ambulance location', ambulance && ambulance.stale, 'ambulance');
+      const missionPoints = route.length >= 2 ? route : (args.origin && args.destination ? [args.origin, args.destination] : []);
+      const fitPoints = missionPoints;
+      const nextFitKey = String(args.mission_id || '') + JSON.stringify(fitPoints);
+      if (fitPoints.length && nextFitKey !== fitKey) {
         fitKey = nextFitKey;
-        const bounds = points.reduce((box, point) => box.extend(point), new maplibregl.LngLatBounds(points[0],points[0]));
-        map.fitBounds(bounds,{padding:60,maxZoom:15,duration:0});
+        const bounds = fitPoints.reduce((box, point) => box.extend(point), new maplibregl.LngLatBounds(fitPoints[0],fitPoints[0]));
+        map.fitBounds(bounds,{padding:Math.min(72, map.getCanvas().clientWidth * 0.09),maxZoom:17,duration:0});
+      } else if (!fitPoints.length && fitKey !== String(args.mission_id || '') + '-bengaluru') {
+        fitKey = String(args.mission_id || '') + '-bengaluru';
+        map.jumpTo({center:[77.5946,12.9716],zoom:11,pitch:52,bearing:-14});
       }
+      map.resize();
     }
     window.addEventListener('message', event => {
       const msg = event.data || {};
@@ -137,6 +134,7 @@
     setInterval(() => {
       if (watchId !== null && lastFixAt && Date.now() - lastFixAt > 30000) message.textContent = 'GPS updates are stale. Check reception or device location services.';
     }, 5000);
+    new ResizeObserver(() => { if (map) { map.resize(); setHeight(Math.ceil(document.body.scrollHeight)); } }).observe(document.body);
     window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1}, '*');
     setHeight(500);
   </script>
