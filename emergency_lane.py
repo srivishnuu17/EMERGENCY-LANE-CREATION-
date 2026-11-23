@@ -275,6 +275,8 @@ with col_logout:
 # -------------------------------------------------------------------------------------------------
 def render_ambulance_driver_dashboard():
     user_email = st.session_state.get("user_email", "driver@bengalurutraffic.gov.in")
+    gmaps_api_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+    embed_url = f"https://www.google.com/maps/embed/v1/place?key={gmaps_api_key}&q=Bengaluru,Karnataka" if gmaps_api_key else "https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d248815.9102251064!2d77.4571585011391!3d12.987925087795608!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x3bae1670c9b44e6d%3A0xf8dfc3e8517e4fe0!2sBengaluru%2C%20Karnataka!5e0!3m2!1sen!2sin!4v1793118446274!5m2!1sen!2sin"
     
     html_content = f"""
     <!DOCTYPE html>
@@ -1210,7 +1212,7 @@ def render_ambulance_driver_dashboard():
 
             <!-- User's Bengaluru Google Maps Embed View with Dedicated Open Link -->
             <div id="gmap-embed-view">
-              <iframe id="gmap-iframe" src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d248815.9102251064!2d77.4571585011391!3d12.987925087795608!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x3bae1670c9b44e6d%3A0xf8dfc3e8517e4fe0!2sBengaluru%2C%20Karnataka!5e0!3m2!1sen!2sin!4v1793118446274!5m2!1sen!2sin" 
+              <iframe id="gmap-iframe" src="{embed_url}" 
                       width="100%" height="100%" style="border:0; filter: invert(92%) hue-rotate(195deg) contrast(140%) brightness(82%) saturate(160%);" 
                       allowfullscreen="" loading="lazy" referrerpolicy="strict-origin-when-cross-origin"></iframe>
               <div class="gmap-floating-card">
@@ -1670,7 +1672,31 @@ def render_ambulance_driver_dashboard():
 
           map = new maplibregl.Map({{
             container: 'tactical-map',
-            style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+            style: {{
+              version: 8,
+              sources: {{
+                'osm-raster': {{
+                  type: 'raster',
+                  tiles: [
+                    'https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png'
+                  ],
+                  tileSize: 256,
+                  attribution: '© OpenStreetMap contributors'
+                }}
+              }},
+              layers: [{{
+                id: 'osm-base',
+                type: 'raster',
+                source: 'osm-raster',
+                minzoom: 0,
+                maxzoom: 19,
+                paint: {{
+                  'raster-opacity': 0.85,
+                  'raster-contrast': 0.25,
+                  'raster-brightness-max': 0.55
+                }}
+              }}]
+            }},
             center: [startPt[1], startPt[0]],
             zoom: 17.6,
             pitch: 68,
